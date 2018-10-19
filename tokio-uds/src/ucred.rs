@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use libc::{gid_t, uid_t};
 
 /// Credentials of a process

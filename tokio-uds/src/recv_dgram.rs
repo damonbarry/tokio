@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use UnixDatagram;
 
 use futures::{Async, Future, Poll};

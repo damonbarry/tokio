@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use {SendDgram, RecvDgram};
 
 use tokio_reactor::{Handle, PollEvented};

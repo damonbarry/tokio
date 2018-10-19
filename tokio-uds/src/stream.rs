@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use ucred::{self, UCred};
 
 use tokio_io::{AsyncRead, AsyncWrite};
@@ -5,16 +6,22 @@ use tokio_reactor::{Handle, PollEvented};
 
 use bytes::{Buf, BufMut};
 use futures::{Async, Future, Poll};
-use iovec::{self, IoVec};
+#[cfg(unix)]
+use iovec;
+use iovec::IoVec;
+#[cfg(unix)]
 use libc;
 use mio::Ready;
+#[cfg(unix)]
 use mio_uds;
+#[cfg(windows)]
+use mio_uds_windows::{self as mio_uds, net::{self, SocketAddr}};
 
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::io::{AsRawFd, RawFd};
-use std::os::unix::net::{self, SocketAddr};
+#[cfg(unix)]
+use std::os::unix::{io::{AsRawFd, RawFd}, net::{self, SocketAddr}};
 use std::path::Path;
 
 /// A structure representing a connected Unix socket.
@@ -78,6 +85,7 @@ impl UnixStream {
     /// This function will create a pair of interconnected Unix sockets for
     /// communicating back and forth between one another. Each socket will be
     /// associated with the event loop whose handle is also provided.
+    #[cfg(unix)]
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
         let (a, b) = try!(mio_uds::UnixStream::pair());
         let a = UnixStream::new(a);
@@ -112,6 +120,7 @@ impl UnixStream {
     }
 
     /// Returns effective credentials of the process which called `connect` or `socketpair`.
+    #[cfg(unix)]
     pub fn peer_cred(&self) -> io::Result<UCred> {
         ucred::get_peer_cred(self)
     }
@@ -128,6 +137,40 @@ impl UnixStream {
     /// (see the documentation of `Shutdown`).
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         self.io.get_ref().shutdown(how)
+    }
+
+    #[cfg(windows)]
+    fn read_bufs(&self, bufs: &mut [&mut IoVec]) -> io::Result<usize> {
+        self.io.get_ref().read_bufs(bufs)
+    }
+
+    #[cfg(unix)]
+    fn read_bufs(&self, bufs: &mut [&mut IoVec]) -> io::Result<usize> {
+        let raw_fd = self.as_raw_fd();
+        let iovecs = iovec::unix::as_os_slice_mut(bufs);
+        let r = libc::readv(raw_fd, iovecs.as_ptr(), iovecs.len() as i32);
+        if r == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(r as usize)
+        }
+    }
+
+    #[cfg(windows)]
+    fn write_bufs(&self, bufs: &[&IoVec]) -> io::Result<usize> {
+        self.io.get_ref().write_bufs(&bufs)
+    }
+
+    #[cfg(unix)]
+    fn write_bufs(&self, bufs: &[&IoVec]) -> io::Result<usize> {
+        let raw_fd = self.as_raw_fd();
+        let iovecs = iovec::unix::as_os_slice(bufs);
+        let r = libc::writev(raw_fd, iovecs.as_ptr(), iovecs.len() as i32);
+        if r == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(r as usize)
+        }
     }
 }
 
@@ -191,21 +234,46 @@ impl<'a> AsyncRead for &'a UnixStream {
         if let Async::NotReady = <UnixStream>::poll_read_ready(self, Ready::readable())? {
             return Ok(Async::NotReady);
         }
-        unsafe {
-            let r = read_ready(buf, self.as_raw_fd());
-            if r == -1 {
-                let e = io::Error::last_os_error();
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    self.io.clear_read_ready(Ready::readable())?;
-                    Ok(Async::NotReady)
-                } else {
-                    Err(e)
-                }
-            } else {
-                let r = r as usize;
-                buf.advance_mut(r);
-                Ok(r.into())
+        let r = unsafe {
+            // The `IoVec` type can't have a 0-length size, so we create a bunch
+            // of dummy versions on the stack with 1 length which we'll quickly
+            // overwrite.
+            let b1: &mut [u8] = &mut [0];
+            let b2: &mut [u8] = &mut [0];
+            let b3: &mut [u8] = &mut [0];
+            let b4: &mut [u8] = &mut [0];
+            let b5: &mut [u8] = &mut [0];
+            let b6: &mut [u8] = &mut [0];
+            let b7: &mut [u8] = &mut [0];
+            let b8: &mut [u8] = &mut [0];
+            let b9: &mut [u8] = &mut [0];
+            let b10: &mut [u8] = &mut [0];
+            let b11: &mut [u8] = &mut [0];
+            let b12: &mut [u8] = &mut [0];
+            let b13: &mut [u8] = &mut [0];
+            let b14: &mut [u8] = &mut [0];
+            let b15: &mut [u8] = &mut [0];
+            let b16: &mut [u8] = &mut [0];
+            let mut bufs: [&mut IoVec; 16] = [
+                b1.into(), b2.into(), b3.into(), b4.into(),
+                b5.into(), b6.into(), b7.into(), b8.into(),
+                b9.into(), b10.into(), b11.into(), b12.into(),
+                b13.into(), b14.into(), b15.into(), b16.into(),
+            ];
+            let n = buf.bytes_vec_mut(&mut bufs);
+            self.read_bufs(&mut bufs[..n])
+        };
+
+        match r {
+            Ok(n) => {
+                unsafe { buf.advance_mut(n); }
+                Ok(Async::Ready(n))
             }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.io.clear_read_ready(Ready::readable())?;
+                Ok(Async::NotReady)
+            }
+            Err(e) => Err(e),
         }
     }
 }
@@ -219,21 +287,28 @@ impl<'a> AsyncWrite for &'a UnixStream {
         if let Async::NotReady = <UnixStream>::poll_write_ready(self)? {
             return Ok(Async::NotReady);
         }
-        unsafe {
-            let r = write_ready(buf, self.as_raw_fd());
-            if r == -1 {
-                let e = io::Error::last_os_error();
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    self.io.clear_write_ready()?;
-                    Ok(Async::NotReady)
-                } else {
-                    Err(e)
-                }
-            } else {
-                let r = r as usize;
-                buf.advance(r);
-                Ok(r.into())
+
+        let r = {
+            // The `IoVec` type can't have a zero-length size, so create a dummy
+            // version from a 1-length slice which we'll overwrite with the
+            // `bytes_vec` method.
+            static DUMMY: &[u8] = &[0];
+            let iovec = <&IoVec>::from(DUMMY);
+            let mut bufs = [iovec; 64];
+            let n = buf.bytes_vec(&mut bufs);
+            self.write_bufs(&bufs[..n])
+        };
+
+        match r {
+            Ok(n) => {
+                buf.advance(n);
+                Ok(Async::Ready(n))
             }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.io.clear_write_ready()?;
+                Ok(Async::NotReady)
+            }
+            Err(e) => Err(e),
         }
     }
 }
@@ -244,6 +319,7 @@ impl fmt::Debug for UnixStream {
     }
 }
 
+#[cfg(unix)]
 impl AsRawFd for UnixStream {
     fn as_raw_fd(&self) -> RawFd {
         self.io.get_ref().as_raw_fd()
@@ -283,74 +359,4 @@ impl Future for ConnectFuture {
             _ => unreachable!(),
         }
     }
-}
-
-unsafe fn read_ready<B: BufMut>(buf: &mut B, raw_fd: RawFd) -> isize {
-    // The `IoVec` type can't have a 0-length size, so we create a bunch
-    // of dummy versions on the stack with 1 length which we'll quickly
-    // overwrite.
-    let b1: &mut [u8] = &mut [0];
-    let b2: &mut [u8] = &mut [0];
-    let b3: &mut [u8] = &mut [0];
-    let b4: &mut [u8] = &mut [0];
-    let b5: &mut [u8] = &mut [0];
-    let b6: &mut [u8] = &mut [0];
-    let b7: &mut [u8] = &mut [0];
-    let b8: &mut [u8] = &mut [0];
-    let b9: &mut [u8] = &mut [0];
-    let b10: &mut [u8] = &mut [0];
-    let b11: &mut [u8] = &mut [0];
-    let b12: &mut [u8] = &mut [0];
-    let b13: &mut [u8] = &mut [0];
-    let b14: &mut [u8] = &mut [0];
-    let b15: &mut [u8] = &mut [0];
-    let b16: &mut [u8] = &mut [0];
-    let mut bufs: [&mut IoVec; 16] = [
-        b1.into(),
-        b2.into(),
-        b3.into(),
-        b4.into(),
-        b5.into(),
-        b6.into(),
-        b7.into(),
-        b8.into(),
-        b9.into(),
-        b10.into(),
-        b11.into(),
-        b12.into(),
-        b13.into(),
-        b14.into(),
-        b15.into(),
-        b16.into(),
-    ];
-
-    let n = buf.bytes_vec_mut(&mut bufs);
-    read_ready_vecs(&mut bufs[..n], raw_fd)
-}
-
-unsafe fn read_ready_vecs(bufs: &mut [&mut IoVec], raw_fd: RawFd) -> isize {
-    let iovecs = iovec::unix::as_os_slice_mut(bufs);
-
-    libc::readv(raw_fd, iovecs.as_ptr(), iovecs.len() as i32)
-}
-
-unsafe fn write_ready<B: Buf>(buf: &mut B, raw_fd: RawFd) -> isize {
-    // The `IoVec` type can't have a zero-length size, so create a dummy
-    // version from a 1-length slice which we'll overwrite with the
-    // `bytes_vec` method.
-    static DUMMY: &[u8] = &[0];
-    let iovec = <&IoVec>::from(DUMMY);
-    let mut bufs = [
-        iovec, iovec, iovec, iovec, iovec, iovec, iovec, iovec, iovec, iovec, iovec, iovec, iovec,
-        iovec, iovec, iovec,
-    ];
-
-    let n = buf.bytes_vec(&mut bufs);
-    write_ready_vecs(&bufs[..n], raw_fd)
-}
-
-unsafe fn write_ready_vecs(bufs: &[&IoVec], raw_fd: RawFd) -> isize {
-    let iovecs = iovec::unix::as_os_slice(bufs);
-
-    libc::writev(raw_fd, iovecs.as_ptr(), iovecs.len() as i32)
 }

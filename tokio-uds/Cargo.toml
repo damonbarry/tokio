@@ -20,12 +20,17 @@ categories = ["asynchronous"]
 bytes = "0.4.8"
 futures = "0.1.21"
 iovec = "0.1.2"
-libc = "0.2.42"
 log = "0.4.2"
 mio = "0.6.14"
-mio-uds = "0.6.5"
 tokio-reactor = { version = "0.1.1", path = "../tokio-reactor" }
 tokio-io = { version = "0.1.6", path = "../tokio-io" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.42"
+mio-uds = "0.6.5"
+
+[target.'cfg(windows)'.dependencies]
+mio-uds-windows = { git = "https://github.com/damonbarry/mio-uds-windows.git" }
 
 [dev-dependencies]
 tokio = { version = "0.1.6", path = "../" }
