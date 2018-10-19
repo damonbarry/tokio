@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 extern crate futures;
 extern crate tokio;
 extern crate tokio_uds;
