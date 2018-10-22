@@ -22,6 +22,8 @@ use std::io::{self, Read, Write};
 use std::net::Shutdown;
 #[cfg(unix)]
 use std::os::unix::{io::{AsRawFd, RawFd}, net::{self, SocketAddr}};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, RawSocket};
 use std::path::Path;
 
 /// A structure representing a connected Unix socket.
@@ -323,6 +325,13 @@ impl fmt::Debug for UnixStream {
 impl AsRawFd for UnixStream {
     fn as_raw_fd(&self) -> RawFd {
         self.io.get_ref().as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl AsRawSocket for UnixStream {
+    fn as_raw_socket(&self) -> RawSocket {
+        self.io.get_ref().as_raw_socket()
     }
 }
 
